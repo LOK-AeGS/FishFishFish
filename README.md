@@ -90,3 +90,13 @@ cp models/det/best_det_saved_model/best_det_float32.tflite  <app>/assets/models/
 cp models/cls/best_cls_saved_model/best_cls_float32.tflite  <app>/assets/models/cls.tflite
 ```
 모델의 클래스 이름(`names`)이 `classes.yaml` 의 `symptom_classes` 값과 일치해야 한다.
+
+## 변경 사항 (직전 커밋 대비)
+
+### 분류 신뢰도 게이트 상향: `0.25 → 0.85`
+
+- 위치: `lib/services/pipeline_service.dart` 의 `clsConfThreshold`
+- 동작: Stage 2(cls)의 top-1 confidence 가 게이트 **미만이면 정상**으로 본다.
+- 배경: 탁한 물(수조) 환경의 **정상 넙치가 질병으로 오판**되는 문제를 줄이기 위해 게이트를 강하게 높였다. (실측 결과, 흙탕물 정상 사진의 질병 오답 신뢰도가 게이트 아래로 떨어져 정상 처리됨)
+- ⚠️ **한계 (임시 조치)**: 게이트가 0.85 로 매우 높아 **신뢰도 0.85 미만의 질병은 모두 정상 처리**된다. 즉 사실상 질병 탐지 민감도를 크게 낮춘 밴드에이드이며, 진짜 경증 질병도 놓칠 수 있다.
+- 근본 해결책: 실제 사용 환경(탁한 물)의 정상 넙치 사진을 모아 `best_cls.pt` 를 **파인튜닝**한 뒤 게이트를 정상 범위로 되돌린다.

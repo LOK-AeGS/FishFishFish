@@ -30,7 +30,10 @@ class PipelineService {
 
   // 분류 신뢰도 임계값: cls top-1 confidence 가 이 값 미만이면 정상으로 본다.
   // (불확실한 저신뢰 질병 예측이 오경보로 이어지지 않게 하는 게이트)
-  static const double clsConfThreshold = 0.25;
+  // 0.25 → 0.85 임시 상향: test8/9(흙탕물 정상)를 전부 정상으로 판별하도록 강하게 높임.
+  // ※ 사실상 질병 탐지를 거의 끈 상태 — 신뢰도 0.85 미만 질병은 모두 정상 처리됨.
+  //   근본 해결 아님(밴드에이드). 파인튜닝으로 대체 예정.
+  static const double clsConfThreshold = 0.85;
 
   // 탐지 전용 모드: Stage 2(cls/질병)를 건너뛰고 넙치 박스만 잡는다.
   // (Stage 1 탐지 검증 완료 → 질병 분류 다시 켬)
