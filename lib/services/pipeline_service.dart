@@ -1,10 +1,12 @@
 // 온디바이스 3-Stage 추론 파이프라인 (Python inference.analyze_image 포팅)
 //   Stage 1: det.tflite  → 넙치 탐지 + 크롭
-//   Stage 2: cls.tflite  → 크롭된 물고기 증상 분류
+//   Stage 2: cls.tflite  → 크롭된 물고기를 7개 클래스로 분류
+//                          (normal/color_change/emaciation/hemorrhage/tumor/ulcer/white_spot)
 //   Stage 3: DiseaseConfig → 질병 매핑 + 위험도 + 다음 행동
 //
 // det / cls 모델을 useMultiInstance 로 동시에 메모리에 올리고, det 결과 박스를
 // image 패키지로 크롭해 cls 에 넘긴다. (네이티브 플러그인 수정 불필요)
+// cls 는 크롭 1장당 top-1 클래스를 내놓는다. top-1 이 normal 이면 정상, 아니면 해당 질병.
 
 import 'dart:typed_data';
 import 'dart:ui';
@@ -26,9 +28,9 @@ class PipelineService {
   // (배경이 복잡하면 오탐이 늘 수 있어, 깨끗한 클로즈업 사용을 권장)
   static const double detConfThreshold = 0.05;
 
-  // 분류 신뢰도 게이트: cls 가 이 값 미만으로 "질병"이라 하면 불확실로 보고 정상 처리.
-  // 노이즈 많은 실시간 크롭에서 정상 개체가 질병으로 오판되는 것을 줄인다.
-  static const double clsConfGate = 0.55;
+  // 분류 신뢰도 임계값: cls top-1 confidence 가 이 값 미만이면 정상으로 본다.
+  // (불확실한 저신뢰 질병 예측이 오경보로 이어지지 않게 하는 게이트)
+  static const double clsConfThreshold = 0.25;
 
   // 탐지 전용 모드: Stage 2(cls/질병)를 건너뛰고 넙치 박스만 잡는다.
   // (Stage 1 탐지 검증 완료 → 질병 분류 다시 켬)
@@ -134,22 +136,26 @@ class PipelineService {
       if (crop == null) continue;
       fishId++;
 
-      // Stage 2: 증상 분류 (top-1)
-      final clsResult = await _cls.predict(crop);
+      // Stage 2: 7-class 분류 (cls) — 크롭된 넙치를 질병/정상으로 분류한다.
+      final clsResult = await _cls.predict(
+        crop,
+        confidenceThreshold: clsConfThreshold,
+      );
       final clsDetections = (clsResult['detections'] as List?)
               ?.whereType<Map>()
               .map(YOLOResult.fromMap)
               .toList() ??
           const <YOLOResult>[];
-      if (clsDetections.isEmpty) continue;
 
-      clsDetections.sort((a, b) => b.confidence.compareTo(a.confidence));
-      final top = clsDetections.first;
-      final symptomConf = top.confidence;
-      // 신뢰도가 낮으면(불확실) 정상으로 처리 — 정상 개체 오판 방지
-      final symptom = (top.className != 'normal' && symptomConf < clsConfGate)
-          ? 'normal'
-          : top.className;
+      // classify 는 크롭 1장당 top-1 클래스를 돌려준다.
+      // top-1 confidence 가 게이트 미만이거나 결과가 없으면 정상으로 본다.
+      var symptom = 'normal';
+      var symptomConf = 0.0;
+      if (clsDetections.isNotEmpty &&
+          clsDetections.first.confidence >= clsConfThreshold) {
+        symptom = clsDetections.first.className;
+        symptomConf = clsDetections.first.confidence;
+      }
 
       // Stage 3: 질병 매핑 + 위험도
       final mapped = _config.mapSymptomToDisease(symptom, symptomConf);
