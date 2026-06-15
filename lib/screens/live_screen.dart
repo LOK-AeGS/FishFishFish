@@ -11,11 +11,17 @@ import 'package:image/image.dart' as img;
 
 import '../labels.dart';
 import '../models/results.dart';
+import '../models/tank.dart';
 import '../services/camera_utils.dart';
 import '../services/pipeline_service.dart';
+import '../services/session_stats.dart';
+import '../widgets/summary_dialog.dart';
 
 class LiveScreen extends StatefulWidget {
-  const LiveScreen({super.key});
+  /// 모니터링 대상 수조. 종료 시 이 수조의 요약을 만들어 돌려준다.
+  final TankProfile tank;
+
+  const LiveScreen({super.key, required this.tank});
 
   @override
   State<LiveScreen> createState() => _LiveScreenState();
@@ -42,6 +48,15 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
   final List<({DateTime t, TankResult r})> _history = [];
   static const Duration _smoothWindow = Duration(milliseconds: 1200);
 
+  // 초당 최대 추론 횟수 상한 (20 FPS = 50ms 간격). 발열/배터리 절약.
+  // 추론이 이보다 빠르게 끝나면 남는 시간만큼 다음 프레임을 미룬다.
+  static const Duration _minInterval = Duration(milliseconds: 50);
+  DateTime? _lastInferenceStart;
+
+  // 세션(이번 모니터링) 누적 통계 — 종료 시 요약에 사용.
+  final _stats = SessionStats();
+  bool _finishing = false; // 종료 요약 진행 중 중복 방지
+
   @override
   void initState() {
     super.initState();
@@ -62,7 +77,9 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
 
       final controller = CameraController(
         back,
-        ResolutionPreset.medium, // 보급형 폰 속도 우선: 변환 픽셀 수 축소(720x480)
+        // 프리뷰는 고해상도로 선명하게(1280x720). 추론 입력은 isolate 에서
+        // 640 폭으로 축소(camera_utils.convertFrame)하므로 속도는 유지된다.
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -94,6 +111,21 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
     if (_busy || !mounted) return;
     final frame = _latest;
     if (frame == null) return;
+
+    // 추론 빈도 상한(20 FPS): 직전 추론 시작으로부터 최소 간격이 안 지났으면
+    // 남은 시간만큼 미뤘다가 다시 시도한다.
+    final last = _lastInferenceStart;
+    if (last != null) {
+      final wait = _minInterval - DateTime.now().difference(last);
+      if (wait > Duration.zero) {
+        Future.delayed(wait, () {
+          if (mounted) _process();
+        });
+        return;
+      }
+    }
+    _lastInferenceStart = DateTime.now();
+
     _busy = true;
     _latest = null;
 
@@ -119,6 +151,7 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
           _imgW = image.width.toDouble();
           _imgH = image.height.toDouble();
         });
+        _stats.add(_result);
       }
     } catch (_) {
       // 프레임 단위 오류는 무시하고 다음 프레임 진행
@@ -168,6 +201,24 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
     return bestMatch ?? _history.last.r;
   }
 
+  // 영상 종료 → 요약 다이얼로그 표시 → 요약을 결과로 들고 홈으로 복귀.
+  Future<void> _finish() async {
+    if (_finishing || !mounted) return;
+    _finishing = true;
+
+    final c = _controller;
+    if (c != null && _streaming) {
+      await c.stopImageStream();
+      _streaming = false;
+    }
+
+    final summary = _stats.build(DateTime.now());
+    if (!mounted) return;
+    await showTankSummaryDialog(context, widget.tank.name, summary);
+    if (!mounted) return;
+    Navigator.of(context).pop(summary);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final c = _controller;
@@ -200,14 +251,42 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: const Text('실시간 모니터링'),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _finish();
+      },
+      child: Scaffold(
         backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
+        appBar: AppBar(
+          title: Text('실시간 · ${widget.tank.name}'),
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+        ),
+        body: _buildBody(),
+        bottomNavigationBar: _ready
+            ? SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFD32F2F),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      onPressed: _finishing ? null : _finish,
+                      icon: const Icon(Icons.stop_circle),
+                      label: const Text('모니터링 종료',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ),
+              )
+            : null,
       ),
-      body: _buildBody(),
     );
   }
 
